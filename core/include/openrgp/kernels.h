@@ -38,7 +38,17 @@ size_t walk_trace(const CodeObjectIsa& isa, const std::vector<InstCat>& trace, s
 // Best walk over every start symbol of the code object; returns consumed count, start index via *start_idx.
 size_t walk_best(const CodeObjectIsa& isa, const std::vector<InstCat>& trace, size_t* start_idx = nullptr);
 
-std::string kernel_label(const CodeObjectIsa& c);
+// Result of matching one wave trace against all code objects. `trace` is what was actually walked (the input, or the
+// wave64-collapsed form when `collapsed`); `consumed` counts its entries that fit the ISA path.
+struct Match {
+    int co = -1; size_t start = 0, consumed = 0; bool collapsed = false; std::vector<InstCat> trace;
+    bool ok() const { return co >= 0 && consumed * 10 >= trace.size() * 8; }
+};
+Match best_match(const std::vector<CodeObjectIsa>& isa, const std::vector<InstCat>& trace);
+
+// `start` is the instruction index the walk began at; it picks the stage of multi-stage code objects.
+std::string kernel_label(const CodeObjectIsa& c, size_t start = (size_t)-1);
+std::string kernel_sig(const CodeObjectIsa& c, size_t start);
 
 struct KernelStats {
     std::string sig, label;
@@ -55,6 +65,7 @@ bool analyze_captures(const std::vector<std::string>& files, const std::string& 
 
 struct DispatchRow {
     int      index = 0;
+    int      event = -1;             // index of the dispatch event in SqttDecode::events (what SqttWave::dispatch refers to)
     int64_t  begin = 0, end = 0;     // shader clock
     uint64_t waves = 0, traced = 0;
     bool     inferred = true;

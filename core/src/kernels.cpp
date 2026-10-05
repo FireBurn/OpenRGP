@@ -157,6 +157,8 @@ size_t walk_trace(const CodeObjectIsa& isa, const std::vector<InstCat>& tr, std:
             if (tk == InstCat::Next && in.cls == ClsCondBranch) { if (path) path->push_back((int)i); i++; k++; continue; }
             return k;
         }
+        // A vector-memory instruction can be traced twice (the issue is replayed); the extra token is not an instruction.
+        if (k > 0 && tk == tr[k - 1] && (tk == InstCat::Vmem || tk == InstCat::Flat) && in.cls != (int)tk) { k++; continue; }
         if (in.cls == (int)tk || (in.cls == ClsEither && (tk == InstCat::Valu || tk == InstCat::Immed))) { if (path) path->push_back((int)i); i++; k++; continue; }
         return k;
     }
@@ -170,9 +172,48 @@ size_t walk_best(const CodeObjectIsa& isa, const std::vector<InstCat>& tr, size_
     return best;
 }
 
-std::string kernel_label(const CodeObjectIsa& c) {
-    static const char* stages[][2] = {{"_gs_main", "geometry/NGG"}, {"_ps_main", "pixel"}, {"_vs_main", "vertex"}, {"_hs_main", "hull"}, {"_ls_main", "local"}, {"_es_main", "export"}};
-    for (auto& st : stages) if (c.name.find(st[0]) != std::string::npos) return std::string(st[1]) + " shader (" + std::to_string(c.ins.size()) + " instrs)";
+// Wave64 waves on RDNA2/3 trace every vector instruction twice. Halve each run of identical vector tokens; empty if a
+// run has odd length (the trace is not consistently doubled).
+static std::vector<InstCat> collapse_wave64(const std::vector<InstCat>& tr) {
+    std::vector<InstCat> out;
+    for (size_t i = 0; i < tr.size();) {
+        InstCat c = tr[i]; size_t j = i; while (j < tr.size() && tr[j] == c) j++;
+        size_t run = j - i;
+        bool vec = c == InstCat::Valu || c == InstCat::Vmem || c == InstCat::Flat || c == InstCat::Lds;
+        if (vec) { if (run % 2) return {}; run /= 2; }
+        out.insert(out.end(), run, c);
+        i = j;
+    }
+    return out;
+}
+
+Match best_match(const std::vector<CodeObjectIsa>& isa, const std::vector<InstCat>& tr) {
+    Match m; m.trace = tr;
+    auto run = [&](const std::vector<InstCat>& t, Match& r) {
+        for (size_t c = 0; c < isa.size(); c++) { size_t st = 0; size_t k = walk_best(isa[c], t, &st); if (k > r.consumed) { r.consumed = k; r.co = (int)c; r.start = st; } }
+    };
+    run(tr, m);
+    if (m.consumed * 10 < tr.size() * 8) {
+        auto col = collapse_wave64(tr);
+        if (!col.empty() && col.size() != tr.size()) {
+            Match m2; m2.trace = col; run(col, m2);
+            if (m2.consumed * 10 >= col.size() * 8 && m2.consumed * tr.size() > m.consumed * col.size()) { m2.collapsed = true; return m2; }
+        }
+    }
+    return m;
+}
+
+std::string kernel_sig(const CodeObjectIsa& c, size_t start) {
+    return c.starts.size() > 1 ? c.sig + "@" + std::to_string(start) : c.sig;
+}
+
+std::string kernel_label(const CodeObjectIsa& c, size_t start) {
+    std::string stage = c.name;
+    for (size_t i = 0; i < c.starts.size(); i++) if ((size_t)c.starts[i] == start) stage = c.start_names[i];
+    if (stage.find("_main") != std::string::npos && stage.find("_cs_") == std::string::npos) {
+        static const char* stages[][2] = {{"_gs_main", "geometry/NGG"}, {"_ps_main", "pixel"}, {"_vs_main", "vertex"}, {"_hs_main", "hull"}, {"_ls_main", "local"}, {"_es_main", "export"}};
+        for (auto& st : stages) if (stage.find(st[0]) != std::string::npos) return std::string(st[1]) + " shader (" + std::to_string(c.ins.size()) + " instrs in object)";
+    }
     if (c.wmma && c.exp) return "flash-attn (WMMA)";
     if (c.wmma) return "matmul (WMMA)";
     if (c.dot4 && c.ds) return "mat-vec int8 (dot4+LDS)";
@@ -209,11 +250,10 @@ bool analyze_captures(const std::vector<std::string>& files, const std::string& 
             g.ws.push_back(&w);
         }
         for (auto& [key, g] : groups) {
-            size_t best = 0; int bi = -1;
-            size_t bstart = 0;
-            for (size_t c = 0; c < isa.size(); c++) { size_t st = 0; size_t k = walk_best(isa[c], g.tr, &st); if (k > best) { best = k; bi = (int)c; bstart = st; } }
-            bool ok = bi >= 0 && best >= g.tr.size() * 8 / 10;
-            std::string sig = ok ? isa[bi].sig : "unmatched-" + std::to_string(g.tr.size());
+            Match mt = best_match(isa, g.tr);
+            size_t best = mt.consumed; int bi = mt.co; size_t bstart = mt.start;
+            bool ok = mt.ok();
+            std::string sig = ok ? kernel_sig(isa[bi], bstart) : "unmatched-" + std::to_string(g.tr.size());
             if (!have_isa) {   // stable id from the category sequence itself
                 uint32_t h = 2166136261u; for (uint8_t k : key) h = (h ^ k) * 16777619u;
                 char b[16]; snprintf(b, sizeof b, "t%08x", h); sig = b;
@@ -222,7 +262,7 @@ bool analyze_captures(const std::vector<std::string>& files, const std::string& 
             if (ks.sig.empty()) {
                 ks.sig = sig;
                 if (!have_isa) ks.label = "(" + std::to_string(g.tr.size()) + "-instruction trace; no llvm-objdump)";
-                else if (ok) ks.label = kernel_label(isa[bi]);
+                else if (ok) ks.label = kernel_label(isa[bi], bstart);
                 else if (bi >= 0 && best > 0) ks.label = "unidentified (best " + std::to_string(100 * best / g.tr.size()) + "% of " + isa[bi].sig + ")";
                 else ks.label = "unidentified";
             }
@@ -237,13 +277,17 @@ bool analyze_captures(const std::vector<std::string>& files, const std::string& 
             ks.spans.push_back(e2 - b);
             if (with_mnemonics && ok) {
                 std::vector<int> path;
-                walk_trace(isa[bi], g.tr, &path, bstart);
+                walk_trace(isa[bi], mt.trace, &path, bstart);
                 for (auto* w : g.ws) {
-                    for (size_t i = 0; i < path.size() && i < w->insts.size(); i++) {
+                    for (size_t i = 0, pi = 0; i < path.size() && pi < w->insts.size(); i++, pi++) {
+                        if (mt.collapsed && pi < w->insts.size()) {   // each ISA instruction owns two trace entries when vector
+                            bool vec = mt.trace[i] == InstCat::Valu || mt.trace[i] == InstCat::Vmem || mt.trace[i] == InstCat::Flat || mt.trace[i] == InstCat::Lds;
+                            if (vec && pi + 1 < w->insts.size()) { auto& a = ks.by_mnemonic[isa[bi].ins[path[i]].text.substr(0, isa[bi].ins[path[i]].text.find(' '))]; a[0]++; a[1] += (uint64_t)(w->insts[pi].duration + w->insts[pi + 1].duration); a[2] += (uint64_t)(w->insts[pi].stall + w->insts[pi + 1].stall); pi++; continue; }
+                        }
                         std::string m = isa[bi].ins[path[i]].text.substr(0, isa[bi].ins[path[i]].text.find(' '));
                         for (const char* sfx : {"_e32", "_e64"}) { size_t q = m.rfind(sfx); if (q != std::string::npos && q + 4 == m.size()) m.erase(q); }
                         auto& a = ks.by_mnemonic[m];
-                        a[0]++; a[1] += (uint64_t)w->insts[i].duration; a[2] += (uint64_t)w->insts[i].stall;
+                        a[0]++; a[1] += (uint64_t)w->insts[pi].duration; a[2] += (uint64_t)w->insts[pi].stall;
                     }
                 }
             }
@@ -264,7 +308,7 @@ bool analyze_dispatches(const std::string& file, const std::string& mcpu, int se
     std::vector<int> ev_index;   // dispatch event index -> row
     for (size_t i = 0; i < d.events.size(); i++) {
         if (d.events[i].kind != EventKind::Dispatch || d.events[i].waves_started == 0) { ev_index.push_back(-1); continue; }
-        DispatchRow r; r.index = (int)out.size(); r.begin = d.events[i].time; r.end = d.events[i].time; r.inferred = d.events[i].inferred;
+        DispatchRow r; r.index = (int)out.size(); r.event = (int)i; r.begin = d.events[i].time; r.end = d.events[i].time; r.inferred = d.events[i].inferred;
         for (int k = 0; k < 3; k++) r.dim[k] = d.events[i].dim[k];
         ev_index.push_back(r.index); out.push_back(r);
     }
@@ -278,9 +322,8 @@ bool analyze_dispatches(const std::string& file, const std::string& mcpu, int se
         std::string sig = "?", label = "unidentified";
         if (have_isa) {
             std::vector<InstCat> tr; for (auto& i : w.insts) tr.push_back(i.cat);
-            size_t best = 0; int bi = -1;
-            for (size_t c = 0; c < isa.size(); c++) { size_t k = walk_best(isa[c], tr); if (k > best) { best = k; bi = (int)c; } }
-            if (bi >= 0 && best >= tr.size() * 8 / 10) { sig = isa[bi].sig; label = kernel_label(isa[bi]); }
+            Match mt = best_match(isa, tr);
+            if (mt.ok()) { sig = kernel_sig(isa[mt.co], mt.start); label = kernel_label(isa[mt.co], mt.start); }
         } else {
             sig = "trace-" + std::to_string(w.insts.size()); label = "(no llvm-objdump)";
         }

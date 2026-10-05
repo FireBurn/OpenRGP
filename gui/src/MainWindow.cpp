@@ -47,7 +47,7 @@ public:
     int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : (int)m_rows.size(); }
     int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : 11; }
     QVariant headerData(int s, Qt::Orientation o, int role) const override {
-        static const char* h[] = {"SE", "CU", "SIMD", "Slot", "Begin", "End", "Cycles", "Dispatch", "Traced", "Insts", "Exec / Wait / Stall"};
+        static const char* h[] = {"SE", "CU", "SIMD", "Slot", "Begin", "End", "Cycles", "Dispatch event", "Traced", "Insts", "Exec / Wait / Stall"};
         return (role == Qt::DisplayRole && o == Qt::Horizontal && s < 11) ? QVariant(h[s]) : QVariant();
     }
     QVariant data(const QModelIndex& ix, int role) const override {
@@ -193,8 +193,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent){
     m_tokens->setReadOnly(true);
 
     m_dispatches = new QTableWidget(this);
-    m_dispatches->setColumnCount(7);
-    m_dispatches->setHorizontalHeaderLabels({"#", "Start", "Cycles", "Waves", "Traced", "Kernel", "Signature"});
+    m_dispatches->setColumnCount(8);
+    m_dispatches->setHorizontalHeaderLabels({"#", "Start", "Cycles", "Waves", "Traced", "Kernel", "Signature", "Event"});
     m_dispatches->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Stretch);
     m_dispatches->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_dispatches->setSortingEnabled(true);
@@ -398,6 +398,7 @@ void MainWindow::showDispatches(){
         m_dispatches->setItem(r, 3, num((double)d.waves)); m_dispatches->setItem(r, 4, num((double)d.traced));
         m_dispatches->setItem(r, 5, new QTableWidgetItem(QString::fromStdString(d.label.empty() ? "(no traced wave)" : d.label)));
         m_dispatches->setItem(r, 6, new QTableWidgetItem(QString::fromStdString(d.sig)));
+        m_dispatches->setItem(r, 7, num(d.event));
         r++;
     }
     m_dispatches->resizeColumnsToContents(); m_dispatches->setSortingEnabled(true);
@@ -416,6 +417,13 @@ void MainWindow::showEvents(){
         m_events->setItem(r, 2, num(e.me)); m_events->setItem(r, 3, num(e.pipe)); m_events->setItem(r, 4, num(e.id));
         m_events->setItem(r, 5, num((double)e.waves_started));
         m_events->setItem(r, 6, new QTableWidgetItem(e.kind == EventKind::Dispatch ? QString(e.inferred ? "inferred from wave activity" : "dim %1 x %2 x %3").arg(e.dim[0]).arg(e.dim[1]).arg(e.dim[2]) : QString()));
+        r++;
+    }
+    for (auto& u : d.util_counters) {
+        m_events->insertRow(r);
+        QString v; for (auto x : u.values) v += QString::number(x) + " ";
+        m_events->setItem(r, 0, num((double)u.time)); m_events->setItem(r, 1, new QTableWidgetItem("utilisation counters"));
+        m_events->setItem(r, 6, new QTableWidgetItem(QString("sa %1 id %2 tm %3: %4").arg(u.sa).arg(u.cid).arg(u.tm).arg(v.trimmed())));
         r++;
     }
     for (auto& s : d.shader_data) {

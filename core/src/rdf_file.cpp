@@ -163,6 +163,10 @@ bool RgpFile::parse_rdf(Profile& out, std::string* err) {
         std::sort(spm_counters.begin(), spm_counters.end(), [](auto& a, auto& b) { return a.first < b.first; });
         std::sort(spm_groups.begin(), spm_groups.end(), [](auto& a, auto& b) { return a.first < b.first; });
         DerivedSpmDb db{}; db.num_timestamps = (uint32_t)spm_ts.size(); db.timestamps = spm_ts;
+        if (spm_ts.size() > 2) {   // the file stores no interval: report the median step between samples
+            std::vector<uint64_t> dl; for (size_t i = 1; i < spm_ts.size(); i++) dl.push_back(spm_ts[i] - spm_ts[i - 1]);
+            std::nth_element(dl.begin(), dl.begin() + dl.size() / 2, dl.end()); db.sampling_interval = (uint32_t)dl[dl.size() / 2];
+        }
         for (auto& c : spm_counters) db.counters.push_back(std::move(c.second));
         for (auto& g : spm_groups) db.groups.push_back(std::move(g.second));
         out.derived_spm = std::move(db);

@@ -103,9 +103,9 @@ static std::string csv_quote(const std::string& s) {
 }
 
 void export_dispatches_csv(const std::vector<DispatchRow>& rows, std::ostream& os) {
-    os << "index,start,cycles,waves,traced_waves,kernel,signature\n";
+    os << "index,event,start,cycles,waves,traced_waves,kernel,signature\n";
     for (auto& r : rows)
-        os << r.index << ',' << r.begin << ',' << (r.end - r.begin) << ',' << r.waves << ',' << r.traced << ',' << csv_quote(r.label) << ',' << r.sig << '\n';
+        os << r.index << ',' << r.event << ',' << r.begin << ',' << (r.end - r.begin) << ',' << r.waves << ',' << r.traced << ',' << csv_quote(r.label) << ',' << r.sig << '\n';
 }
 
 void export_occupancy_csv(const SqttDecode& d, int64_t bin, std::ostream& os) {

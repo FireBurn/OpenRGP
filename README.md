@@ -30,7 +30,7 @@ The wave count of the 32k-token llama.cpp capture (246,898) equals RGP's own log
 
 Limits: radv traces carry no dispatch markers, so dispatch boundaries are inferred (a drained engine or a
 >1000-cycle pause in wave launches) and can split or merge neighbouring dispatches. Kernel identification
-works for compute kernels on RDNA2, RDNA3 and RDNA4; RDNA2 graphics shaders are still unidentified (see TODO.md). Without
+works for compute and graphics shaders on RDNA2, RDNA3 and RDNA4 (graphics validated on one RDNA2 capture only). Without
 `llvm-objdump` the kernel commands group waves by trace signature instead.
 
 ## Language
