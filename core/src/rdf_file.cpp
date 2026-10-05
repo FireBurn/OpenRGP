@@ -76,6 +76,9 @@ bool RgpFile::parse_rdf(Profile& out, std::string* err) {
     out.header.magic = kMagic; out.header.version_major = 1; out.header.version_minor = 6;
     out.container = "AMD_RDF";
 
+    std::vector<uint64_t> spm_ts;
+    std::vector<std::pair<uint32_t, DerivedSpmGroup>> spm_groups;
+    std::vector<std::pair<uint32_t, DerivedSpmCounter>> spm_counters;
     for (auto& x : entries) {
         out.rdf_chunks.push_back(x.id);
         const uint8_t* d; size_t n;
@@ -130,7 +133,39 @@ bool RgpFile::parse_rdf(Profile& out, std::string* err) {
             SqttDataRef dr; dr.offset = (int32_t)offset_of(d); dr.size = (int32_t)n;
             out.sqtt_data.push_back(dr); out.sqtt_data_ptr.push_back(d);
         }
-        // SpmSession / SpmCounterData use a different counter encoding than the radv format: not decoded yet.
+        else if (x.id == "SpmSession" && hs >= 20) {
+            spm_ts.assign(n / 8, 0);
+            for (size_t i = 0; i < spm_ts.size(); i++) spm_ts[i] = u64(d + i * 8);
+        } else if (x.id == "DerivedSpmGroup" && hs >= 20) {
+            // header: {0, index, counter count, name length, 0}; data: counter indices then the name
+            uint32_t idx = u32(h + 4), cnt = u32(h + 8), nl = u32(h + 12);
+            if ((size_t)cnt * 4 + nl > n) continue;
+            DerivedSpmGroup g; for (uint32_t i = 0; i < cnt; i++) g.counter_ids.push_back(u32(d + i * 4));
+            g.name.assign((const char*)d + cnt * 4, nl);
+            spm_groups.push_back({idx, std::move(g)});
+        } else if (x.id == "DerivedSpmCtr" && hs >= 24) {
+            // header: {0, index, component count, usage, name length, description length};
+            // data: one double per timestamp, component indices (u32), name, description
+            uint32_t idx = u32(h + 4), ncomp = u32(h + 8), usage = u32(h + 12), nl = u32(h + 16), dl = u32(h + 20);
+            size_t tail_len = (size_t)ncomp * 4 + nl + dl;
+            if (tail_len > n) continue;
+            size_t nv = (n - tail_len) / 8;
+            DerivedSpmCounter c; c.usage_type = usage;
+            c.values.resize(nv); std::memcpy(c.values.data(), d, nv * 8);
+            const uint8_t* t = d + nv * 8;
+            for (uint32_t i = 0; i < ncomp; i++) c.component_ids.push_back(u32(t + i * 4));
+            c.name.assign((const char*)t + ncomp * 4, nl);
+            c.description.assign((const char*)t + ncomp * 4 + nl, dl);
+            spm_counters.push_back({idx, std::move(c)});
+        }
+    }
+    if (!spm_counters.empty()) {
+        std::sort(spm_counters.begin(), spm_counters.end(), [](auto& a, auto& b) { return a.first < b.first; });
+        std::sort(spm_groups.begin(), spm_groups.end(), [](auto& a, auto& b) { return a.first < b.first; });
+        DerivedSpmDb db{}; db.num_timestamps = (uint32_t)spm_ts.size(); db.timestamps = spm_ts;
+        for (auto& c : spm_counters) db.counters.push_back(std::move(c.second));
+        for (auto& g : spm_groups) db.groups.push_back(std::move(g.second));
+        out.derived_spm = std::move(db);
     }
     if (out.sqtt_descs.empty()) return fail("RDF file has no SqttData chunks");
     return true;

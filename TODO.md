@@ -10,22 +10,24 @@ CLI (`openrgp_cli`) and a Qt 6 GUI (`openrgp_gui`). See README.md for usage and 
   command-processor events (dispatch, cs-partial-flush, cache flush, bottom-of-pipe, trace flush/stall, save-context).
   Validated against AMD rocprof-trace-decoder 0.1.6 on RDNA4, RDNA3 (780M) and RDNA2 (RX 6800M) captures.
 - Dispatch table: marker-based when markers exist, otherwise inferred from wave activity.
-- Kernel identification by ISA walk (`kernels`, `cycles`, `dispatches`), with a trace-signature fallback when
+- Kernel identification by ISA walk (RDNA2/3 rules: scratch is VMEM, graphics stages named by shader stage) (`kernels`, `cycles`, `dispatches`), with a trace-signature fallback when
   `llvm-objdump` is unavailable.
-- Occupancy and idle-gap analysis; CSV/JSON export; GUI tabs for dispatches, occupancy, timeline, waves; screenshot mode.
+- Occupancy and idle-gap analysis; CSV/JSON export; GUI tabs for dispatches, occupancy, timeline, waves (virtual table, no
+  row cap), events; decoding runs on a worker thread; screenshot mode.
+- AMD_RDF derived SPM counters; RDNA2/3 utilisation-counter tokens.
 - Tests: `ctest` runs RDNA4 and RDNA2 decodes against checked-in captures (and RDNA3 via OPENRGP_TEST_RDNA3).
 
 ## Open
-- Kernel identification on RDNA2/3: `classify()` in kernels.cpp encodes which instructions the gfx12 trace omits
-  (s_delay_alu, s_wait_alu, s_barrier_wait, exports). RDNA2/3 emit a different set, so most shaders there come back
-  "unidentified". Needs per-generation rules; AMD's decoder can print its instruction stream for comparison
-  (tools/rtd).
-- Dispatch inference is heuristic (1000-cycle launch gap). Real dispatch markers (REG_INIT/user-data) appear in
-  captures from other drivers; the marker path exists but is untested beyond the radv captures, which carry few.
-- SPM data inside AMD_RDF files (SpmSession/SpmCounterData chunks) is not decoded; `info` lists the chunks only.
-- Counters tokens (UTILCTR) are skipped; shader-data tokens are collected but not shown in the GUI.
-- GUI decodes on the UI thread (a 44 MB trace takes a few seconds); the Waves tab is capped at 50,000 rows.
-- AMD_RDF capture date is not parsed (`info` prints "unknown").
+- Graphics shaders on RDNA2 (vkcube's NGG/geometry waves) are not identified: their wave traces don't walk through the
+  code objects in the capture (merged-stage prologues). Compute kernels on RDNA2/3 are identified.
+- RDNA2/3 trace some constant v_mov instructions as IMMED and some as VALU; the walker accepts either (ClsEither).
+  The real rule is unknown.
+- Dispatch inference is heuristic (1000-cycle launch gap) when a trace has no dispatch markers. The Waves tab shows
+  the raw event index in its Dispatch column, which differs from the row number in the Dispatches tab.
+- AMD_RDF: derived SPM counters are decoded; the raw SPM chunks (SpmCounterData) and sampling interval are not.
+  The sample file carries no capture date (`info` prints "unknown").
+- Utilisation-counter samples (RDNA2/3) and shader-data tokens are decoded and counted by `events`; only shader data is
+  shown in the GUI.
 - The oracle (tools/rtd) needs AMD's closed decoder library; only used for validation, never by the product.
 
 ## Validation targets

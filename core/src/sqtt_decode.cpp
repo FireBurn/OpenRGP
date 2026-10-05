@@ -439,6 +439,18 @@ bool decode_sqtt(const uint8_t* data, size_t size, int se, SqttDecode& out, std:
             if (f & 0x10) push(EventKind::TtStallBegin);
             if (f & 0x20) push(EventKind::TtStallEnd);
             break; }
+        case T_UTIL_COUNTER: {
+            if (ver >= 4) break;
+            SqttUtilCounter u; u.time = now; u.tm = (c >> 7) & 3;
+            if (ver == 3) {
+                u.cid = (c >> 9) & 3; u.sa = (c >> 47) & 1;
+                for (int i = 0; i < 9; i++) u.values.push_back((c >> (11 + 4 * i)) & 0xf);
+            } else {
+                u.cid = (c >> 57) & 0x3f; u.sa = (c >> 63) & 1;
+                for (int i = 0; i < 6; i++) u.values.push_back((c >> (9 + 8 * i)) & 0xff);
+            }
+            out.util_counters.push_back(std::move(u));
+            break; }
         case T_SHADER_DATA: case T_SHADER_DATA_SHORT: {
             bool sh = type == T_SHADER_DATA_SHORT;
             SqttShaderData d; d.time = now; d.shortform = sh;

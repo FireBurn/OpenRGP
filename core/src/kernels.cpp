@@ -13,7 +13,8 @@
 namespace openrgp {
 namespace {
 
-int classify(const std::string& t) {
+// `pre_gfx12`: RDNA2/3 route scratch accesses through the vector-memory path (traced as VMEM, not FLAT).
+int classify(const std::string& t, bool pre_gfx12) {
     size_t sp = t.find(' ');
     std::string m = t.substr(0, sp);
     auto starts = [&](const char* p) { return m.rfind(p, 0) == 0; };
@@ -31,8 +32,16 @@ int classify(const std::string& t) {
     if (starts("s_sendmsg") || starts("s_ttrace") || starts("s_message")) return (int)InstCat::Msg;
     if (starts("s_")) return (int)InstCat::Salu;
     if (starts("ds_")) return (int)InstCat::Lds;
-    if (starts("flat_") || starts("scratch_")) return (int)InstCat::Flat;
+    if (starts("flat_")) return (int)InstCat::Flat;
+    if (starts("scratch_")) return (int)(pre_gfx12 ? InstCat::Vmem : InstCat::Flat);
     if (starts("global_") || starts("buffer_") || starts("image_") || starts("tbuffer_")) return (int)InstCat::Vmem;
+    // RDNA2/3 sometimes trace a v_mov from a constant or SGPR as an immediate-class instruction instead of a VALU one.
+    if (starts("v_mov_b32")) {
+        size_t c = t.find(','), e = t.find_first_of(" ,", c == std::string::npos ? t.size() : c + 2);
+        std::string src = c == std::string::npos ? "" : t.substr(c + 1, e == std::string::npos ? std::string::npos : e - c - 1);
+        size_t b = src.find_first_not_of(' ');
+        if (b != std::string::npos && src[b] != 'v') return ClsEither;
+    }
     return (int)InstCat::Valu;
 }
 
@@ -90,7 +99,7 @@ bool disassemble(const uint8_t* elf, size_t size, const std::string& mcpu, CodeO
             if (q == s) break;
             words++;
         }
-        IsaInst in_; in_.off = (uint32_t)addr; in_.size = 4u * words; in_.text = text; in_.cls = classify(text);
+        IsaInst in_; in_.off = (uint32_t)addr; in_.size = 4u * words; in_.text = text; in_.cls = classify(text, mcpu.rfind("gfx12", 0) != 0);
         long tgt = -1;
         const char* lt = strchr(q, '<');
         if (lt) { const char* pl = strstr(lt, "+0x"); if (pl) tgt = (long)strtoul(pl + 3, nullptr, 16); }
@@ -148,7 +157,7 @@ size_t walk_trace(const CodeObjectIsa& isa, const std::vector<InstCat>& tr, std:
             if (tk == InstCat::Next && in.cls == ClsCondBranch) { if (path) path->push_back((int)i); i++; k++; continue; }
             return k;
         }
-        if (in.cls == (int)tk) { if (path) path->push_back((int)i); i++; k++; continue; }
+        if (in.cls == (int)tk || (in.cls == ClsEither && (tk == InstCat::Valu || tk == InstCat::Immed))) { if (path) path->push_back((int)i); i++; k++; continue; }
         return k;
     }
     return k;
@@ -162,6 +171,8 @@ size_t walk_best(const CodeObjectIsa& isa, const std::vector<InstCat>& tr, size_
 }
 
 std::string kernel_label(const CodeObjectIsa& c) {
+    static const char* stages[][2] = {{"_gs_main", "geometry/NGG"}, {"_ps_main", "pixel"}, {"_vs_main", "vertex"}, {"_hs_main", "hull"}, {"_ls_main", "local"}, {"_es_main", "export"}};
+    for (auto& st : stages) if (c.name.find(st[0]) != std::string::npos) return std::string(st[1]) + " shader (" + std::to_string(c.ins.size()) + " instrs)";
     if (c.wmma && c.exp) return "flash-attn (WMMA)";
     if (c.wmma) return "matmul (WMMA)";
     if (c.dot4 && c.ds) return "mat-vec int8 (dot4+LDS)";

@@ -19,7 +19,7 @@ struct IsaInst {
     int      target = -1;         // branch target as an instruction index, -1 if none
     std::string text;
 };
-enum : int { ClsSkip = -1, ClsCondBranch = -2, ClsEnd = -3 };
+enum : int { ClsSkip = -1, ClsCondBranch = -2, ClsEnd = -3, ClsEither = -4 /* traced as VALU or as IMMED */ };
 
 struct CodeObjectIsa {
     std::vector<IsaInst> ins;

@@ -29,8 +29,8 @@ instruction, identical exec/wait/stall per wave):
 The wave count of the 32k-token llama.cpp capture (246,898) equals RGP's own log.
 
 Limits: radv traces carry no dispatch markers, so dispatch boundaries are inferred (a drained engine or a
->1000-cycle pause in wave launches) and can split or merge neighbouring dispatches. Kernel identification is
-validated on RDNA4; on RDNA2/3 the instruction-class rules still miss many shaders (see TODO.md). Without
+>1000-cycle pause in wave launches) and can split or merge neighbouring dispatches. Kernel identification
+works for compute kernels on RDNA2, RDNA3 and RDNA4; RDNA2 graphics shaders are still unidentified (see TODO.md). Without
 `llvm-objdump` the kernel commands group waves by trace signature instead.
 
 ## Language
@@ -75,8 +75,8 @@ openrgp_gui [file]
 openrgp_gui <file> --screenshot <dir>     # one PNG per tab (also a smoke test)
 ```
 Tabs: **Summary**, **Dispatches** (kernel table), **Occupancy** (resident waves and idle gaps per shader engine),
-**Timeline** (wave lifetimes per SIMD slot, coloured by dispatch; wheel zooms, drag pans), **Waves** (sortable,
-first 50,000), **SPM Counters**, **Tokens**. File > Export writes the CSV and JSON files described above.
+**Timeline** (wave lifetimes per SIMD slot, coloured by dispatch; wheel zooms, drag pans), **Waves** (sortable),
+**Events**, **SPM Counters**, **Tokens**. File > Export writes the CSV and JSON files described above.
 
 ## Library
 

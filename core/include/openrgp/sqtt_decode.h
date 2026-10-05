@@ -69,6 +69,14 @@ struct SqttEvent {
 struct SqttShaderData { int64_t time; uint32_t value; int cu, simd, slot; bool priv, shortform; };
 
 // A memory instruction issued by a wave on a SIMD that is not the traced one (category and issue cycles only).
+// Utilisation counter sample (RDNA2/3 only). values follow the token order: RDNA3 spi_busy, vdata0, vdata1, sdata0, sdata1,
+// lds0, lds1, exp0, exp1 (4 bits each); RDNA2 spi_busy-or-lds1, vdata0, vdata1, sdata0, sdata1, lds0 (8 bits each).
+struct SqttUtilCounter {
+    int64_t time = 0;
+    int sa = 0, cid = 0, tm = 0;
+    std::vector<uint16_t> values;
+};
+
 struct SqttOtherSimd { int64_t time; InstCat cat; int cycles; };
 
 struct SqttDecode {
@@ -80,6 +88,7 @@ struct SqttDecode {
     std::vector<SqttWave> waves;   // every wave seen in this SE (traced ones carry instructions)
     std::vector<SqttEvent> events;
     std::vector<SqttShaderData> shader_data;
+    std::vector<SqttUtilCounter> util_counters;
     std::vector<SqttOtherSimd> other_simd;
     int64_t  realtime_frequency = 0, counter_frequency = 0;
     uint64_t save_context_waves = 0;

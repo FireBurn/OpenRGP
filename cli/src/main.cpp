@@ -205,7 +205,7 @@ static int cmd_events(const std::string& path, int se, int limit){
     SqttDecode d; std::string err;
     if(!decode_sqtt_gfx12(p.sqtt_data_ptr[se], p.sqtt_data[se].size, se, d, &err)){ std::cerr << err << "\n"; return 1; }
     std::map<int,int> c; for(auto& e : d.events) c[(int)e.kind]++;
-    printf("SE%d: %zu events, %zu shader-data tokens, %zu other-SIMD memory instructions\n", se, d.events.size(), d.shader_data.size(), d.other_simd.size());
+    printf("SE%d: %zu events, %zu shader-data tokens, %zu utilisation-counter samples, %zu other-SIMD memory instructions\n", se, d.events.size(), d.shader_data.size(), d.util_counters.size(), d.other_simd.size());
     for(auto& [k, v] : c) printf("  %-16s %d\n", event_kind_name((EventKind)k), v);
     int n = 0;
     for(auto& e : d.events){ if(limit >= 0 && n++ >= limit) break; printf("  t=%-10lld %-16s me=%u pipe=%u id=%u%s\n", (long long)e.time, event_kind_name(e.kind), e.me, e.pipe, e.id, e.inferred ? " (inferred)" : ""); }

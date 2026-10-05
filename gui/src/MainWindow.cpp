@@ -13,6 +13,9 @@
 #include <QHeaderView>
 #include <QMessageBox>
 #include <QStatusBar>
+#include <QTableView>
+#include <QAbstractTableModel>
+#include <QSortFilterProxyModel>
 #include <QComboBox>
 #include <QSpinBox>
 #include <QPainter>
@@ -31,6 +34,36 @@
 using namespace openrgp;
 
 static uint32_t majorOf(SqttVersion v){ return (v>=SqttVersion::V3_2)?3:2; }
+
+// Virtual table over every wave of every decoded shader engine (no row cap).
+class WaveModel : public QAbstractTableModel {
+public:
+    explicit WaveModel(QObject* p = nullptr) : QAbstractTableModel(p) {}
+    void set(const openrgp::CaptureDecode* c) {
+        beginResetModel(); m_c = c; m_rows.clear();
+        if (c) for (size_t k = 0; k < c->se.size(); k++) for (size_t i = 0; i < c->se[k].waves.size(); i++) m_rows.push_back({(uint32_t)k, (uint32_t)i});
+        endResetModel();
+    }
+    int rowCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : (int)m_rows.size(); }
+    int columnCount(const QModelIndex& parent = {}) const override { return parent.isValid() ? 0 : 11; }
+    QVariant headerData(int s, Qt::Orientation o, int role) const override {
+        static const char* h[] = {"SE", "CU", "SIMD", "Slot", "Begin", "End", "Cycles", "Dispatch", "Traced", "Insts", "Exec / Wait / Stall"};
+        return (role == Qt::DisplayRole && o == Qt::Horizontal && s < 11) ? QVariant(h[s]) : QVariant();
+    }
+    QVariant data(const QModelIndex& ix, int role) const override {
+        if (!m_c || role != Qt::DisplayRole || ix.row() >= (int)m_rows.size()) return {};
+        auto [k, i] = m_rows[ix.row()]; auto& w = m_c->se[k].waves[i];
+        switch (ix.column()) {
+        case 0: return m_c->se_index[k];  case 1: return w.cu;  case 2: return w.simd;  case 3: return w.slot;
+        case 4: return (qlonglong)w.begin;  case 5: return (qlonglong)w.end;  case 6: return (qlonglong)(w.end - w.begin);
+        case 7: return w.dispatch;  case 8: return w.traced ? "yes" : "";  case 9: return (qlonglong)w.insts.size();
+        case 10: return w.traced ? QString("%1 / %2 / %3").arg(w.exec).arg(w.wait).arg(w.stall) : QString();
+        }
+        return {};
+    }
+private:
+    const openrgp::CaptureDecode* m_c = nullptr; std::vector<std::pair<uint32_t, uint32_t>> m_rows;
+};
 
 // Resident waves over time for one shader engine, with idle gaps highlighted.
 class OccupancyView : public QWidget {
@@ -166,12 +199,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent){
     m_dispatches->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_dispatches->setSortingEnabled(true);
 
-    m_waves = new QTableWidget(this);
-    m_waves->setColumnCount(11);
-    m_waves->setHorizontalHeaderLabels({"SE", "CU", "SIMD", "Slot", "Begin", "End", "Cycles", "Dispatch", "Traced", "Insts", "Exec / Wait / Stall"});
-    m_waves->horizontalHeader()->setSectionResizeMode(10, QHeaderView::Stretch);
+    m_waveModel = new WaveModel(this);
+    auto* proxy = new QSortFilterProxyModel(this); proxy->setSourceModel(m_waveModel); proxy->setSortRole(Qt::DisplayRole);
+    m_waves = new QTableView(this);
+    m_waves->setModel(proxy); m_waves->setSortingEnabled(true);
+    m_waves->horizontalHeader()->setStretchLastSection(true);
     m_waves->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_waves->setSortingEnabled(true);
+
+    m_events = new QTableWidget(this);
+    m_events->setColumnCount(7);
+    m_events->setHorizontalHeaderLabels({"Time", "Event", "ME", "Pipe", "Id", "Waves started", "Kind detail"});
+    m_events->horizontalHeader()->setStretchLastSection(true);
+    m_events->setEditTriggers(QAbstractItemView::NoEditTriggers);
 
     auto* analysis = new QWidget(this);
     auto* av = new QVBoxLayout(analysis);
@@ -192,6 +231,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent){
     m_tabs->addTab(analysis, "Occupancy");
     m_tabs->addTab(tl, "Timeline");
     m_tabs->addTab(m_waves, "Waves");
+    m_tabs->addTab(m_events, "Events");
     m_tabs->addTab(m_spm, "SPM Counters");
     m_tabs->addTab(m_tokens, "Tokens");
     lay->addWidget(m_tabs);
@@ -225,19 +265,23 @@ void MainWindow::openFile(const QString& path){
     showSpm(p);
     showTokens(p);
     m_path = path;
-    QApplication::setOverrideCursor(Qt::WaitCursor);
-    statusBar()->showMessage("Decoding thread trace…"); QApplication::processEvents();
-    m_cap = std::make_unique<CaptureDecode>(); m_rows.clear();
-    std::string derr;
-    if (decode_capture(path.toStdString(), *m_cap, &derr)) {
-        std::string aerr;
-        analyze_dispatches(path.toStdString(), guess_mcpu(m_cap->p), m_cap->se_index.front(), m_rows, &aerr);
-    } else { m_cap.reset(); statusBar()->showMessage(QString::fromStdString("No decodable thread trace: " + derr), 8000); }
-    m_seBox->blockSignals(true); m_seBox->clear();
-    if (m_cap) for (int i : m_cap->se_index) m_seBox->addItem(QString("SE %1").arg(i));
-    m_seBox->blockSignals(false);
-    showDispatches(); showWaves(); refreshAnalysis();
-    QApplication::restoreOverrideCursor();
+    if (m_worker.joinable()) m_worker.join();
+    m_cap.reset(); m_rows.clear(); m_waveModel->set(nullptr);
+    showDispatches(); showEvents(); refreshAnalysis();
+    statusBar()->showMessage("Decoding thread trace…");
+    QApplication::setOverrideCursor(Qt::BusyCursor); m_decoding = true;
+    const int gen = ++m_generation; const std::string file = path.toStdString();
+    m_worker = std::thread([this, gen, file] {
+        auto cap = std::make_unique<CaptureDecode>(); std::vector<DispatchRow> rows; std::string derr;
+        if (decode_capture(file, *cap, &derr)) { std::string aerr; analyze_dispatches(file, guess_mcpu(cap->p), cap->se_index.front(), rows, &aerr); }
+        else cap.reset();
+        auto* raw = cap.release();
+        QMetaObject::invokeMethod(this, [this, gen, raw, rows = std::move(rows), derr]() mutable {
+            std::unique_ptr<CaptureDecode> own(raw);
+            if (gen != m_generation) { return; }
+            decodeFinished(std::move(own), std::move(rows), QString::fromStdString(derr));
+        }, Qt::QueuedConnection);
+    });
     setWindowTitle("OpenRGP - " + path);
     statusBar()->showMessage("Loaded " + path, 5000);
 }
@@ -322,6 +366,25 @@ void MainWindow::showTokens(const Profile& p){
     m_tokens->setPlainText(QString::fromStdString(o.str()));
 }
 
+MainWindow::~MainWindow(){ ++m_generation; if (m_worker.joinable()) m_worker.join(); }
+
+void MainWindow::waitForDecode(){
+    if (m_worker.joinable()) m_worker.join();
+    while (m_decoding) QApplication::processEvents(QEventLoop::AllEvents, 50);
+}
+
+void MainWindow::decodeFinished(std::unique_ptr<CaptureDecode> cap, std::vector<DispatchRow> rows, QString error){
+    m_cap = std::move(cap); m_rows = std::move(rows);
+    if (!m_cap) statusBar()->showMessage("No decodable thread trace: " + error, 8000);
+    else statusBar()->showMessage("Loaded " + m_path, 5000);
+    m_seBox->blockSignals(true); m_seBox->clear();
+    if (m_cap) for (int i : m_cap->se_index) m_seBox->addItem(QString("SE %1").arg(i));
+    m_seBox->blockSignals(false);
+    m_waveModel->set(m_cap.get());
+    showDispatches(); showEvents(); refreshAnalysis();
+    QApplication::restoreOverrideCursor(); m_decoding = false;
+}
+
 int MainWindow::tabCount() const { return m_tabs->count(); }
 void MainWindow::setTab(int i){ m_tabs->setCurrentIndex(i); }
 
@@ -330,7 +393,7 @@ void MainWindow::showDispatches(){
     int r = 0;
     for (auto& d : m_rows) {
         m_dispatches->insertRow(r);
-        auto num = [](double v) { auto* it = new QTableWidgetItem; it->setData(Qt::DisplayRole, v); return it; };
+        auto num = [](double v) { auto* it = new QTableWidgetItem; it->setData(Qt::DisplayRole, (qlonglong)v); return it; };
         m_dispatches->setItem(r, 0, num(d.index)); m_dispatches->setItem(r, 1, num((double)d.begin)); m_dispatches->setItem(r, 2, num((double)(d.end - d.begin)));
         m_dispatches->setItem(r, 3, num((double)d.waves)); m_dispatches->setItem(r, 4, num((double)d.traced));
         m_dispatches->setItem(r, 5, new QTableWidgetItem(QString::fromStdString(d.label.empty() ? "(no traced wave)" : d.label)));
@@ -340,27 +403,32 @@ void MainWindow::showDispatches(){
     m_dispatches->resizeColumnsToContents(); m_dispatches->setSortingEnabled(true);
 }
 
-void MainWindow::showWaves(){
-    m_waves->setSortingEnabled(false); m_waves->setRowCount(0);
-    if (!m_cap) { m_waves->setSortingEnabled(true); return; }
-    constexpr size_t kMax = 50000;   // the full list is available through File > Export
+void MainWindow::showEvents(){
+    m_events->setRowCount(0);
+    int i = m_seBox ? m_seBox->currentIndex() : -1;
+    if (!m_cap || i < 0 || i >= (int)m_cap->se.size()) return;
+    auto& d = m_cap->se[i];
     int r = 0;
-    for (size_t k = 0; k < m_cap->se.size() && (size_t)r < kMax; k++)
-        for (auto& w : m_cap->se[k].waves) {
-            if ((size_t)r >= kMax) break;
-            m_waves->insertRow(r);
-            auto num = [](double v) { auto* it = new QTableWidgetItem; it->setData(Qt::DisplayRole, v); return it; };
-            m_waves->setItem(r, 0, num(m_cap->se_index[k])); m_waves->setItem(r, 1, num(w.cu)); m_waves->setItem(r, 2, num(w.simd)); m_waves->setItem(r, 3, num(w.slot));
-            m_waves->setItem(r, 4, num((double)w.begin)); m_waves->setItem(r, 5, num((double)w.end)); m_waves->setItem(r, 6, num((double)(w.end - w.begin)));
-            m_waves->setItem(r, 7, num(w.dispatch)); m_waves->setItem(r, 8, new QTableWidgetItem(w.traced ? "yes" : ""));
-            m_waves->setItem(r, 9, num((double)w.insts.size()));
-            m_waves->setItem(r, 10, new QTableWidgetItem(w.traced ? QString("%1 / %2 / %3").arg(w.exec).arg(w.wait).arg(w.stall) : QString()));
-            r++;
-        }
-    m_waves->resizeColumnsToContents(); m_waves->setSortingEnabled(true);
+    auto num = [](double v) { auto* it = new QTableWidgetItem; it->setData(Qt::DisplayRole, (qlonglong)v); return it; };
+    for (auto& e : d.events) {
+        m_events->insertRow(r);
+        m_events->setItem(r, 0, num((double)e.time)); m_events->setItem(r, 1, new QTableWidgetItem(event_kind_name(e.kind)));
+        m_events->setItem(r, 2, num(e.me)); m_events->setItem(r, 3, num(e.pipe)); m_events->setItem(r, 4, num(e.id));
+        m_events->setItem(r, 5, num((double)e.waves_started));
+        m_events->setItem(r, 6, new QTableWidgetItem(e.kind == EventKind::Dispatch ? QString(e.inferred ? "inferred from wave activity" : "dim %1 x %2 x %3").arg(e.dim[0]).arg(e.dim[1]).arg(e.dim[2]) : QString()));
+        r++;
+    }
+    for (auto& s : d.shader_data) {
+        m_events->insertRow(r);
+        m_events->setItem(r, 0, num((double)s.time)); m_events->setItem(r, 1, new QTableWidgetItem("shader data"));
+        m_events->setItem(r, 4, num(s.value)); m_events->setItem(r, 6, new QTableWidgetItem(QString("cu %1 simd %2 slot %3%4").arg(s.cu).arg(s.simd).arg(s.slot).arg(s.priv ? " (trap)" : "")));
+        r++;
+    }
+    m_events->resizeColumnsToContents();
 }
 
 void MainWindow::refreshAnalysis(){
+    showEvents();
     int i = m_seBox->currentIndex();
     if (!m_cap || i < 0 || i >= (int)m_cap->se.size()) { m_occupancy->set({}, {}, 0); m_timeline->set(nullptr); m_gapLabel->clear(); return; }
     auto& d = m_cap->se[i];
