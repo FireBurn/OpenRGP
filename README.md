@@ -24,7 +24,7 @@ instruction, identical exec/wait/stall per wave):
 |---|---|---|---|
 | RDNA4 (SQTT 4) | RX 9060 XT / Strix Halo | 56,847 (9 radv captures + one RDF sample) | 2.0M+ |
 | RDNA3 (SQTT 3) | Radeon 780M | 1,275 | 10.3M |
-| RDNA2 (SQTT 1-2) | RX 6800M | 55 | 4,016 |
+| RDNA2 (SQTT 1-2) | RX 6800M | 233 (4 vkcube captures) | 4,016+ |
 
 The wave count of the 32k-token llama.cpp capture (246,898) equals RGP's own log.
 

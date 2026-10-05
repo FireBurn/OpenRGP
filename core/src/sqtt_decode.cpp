@@ -547,11 +547,15 @@ void infer_dispatches(SqttDecode& d) {
     for (size_t i = 0; i < d.waves.size(); i++) if (d.waves[i].complete && d.waves[i].end >= d.waves[i].begin) order.push_back(i);
     std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return d.waves[a].begin < d.waves[b].begin; });
     // Consecutive dispatches overlap while the first drains, so a long pause in wave launches also starts a new one.
+    // Residency does not help to tell the two cases apart: long-running waves (VGPR-limited matmuls) pause launches
+    // with the engine nearly full inside one dispatch, while back-to-back small dispatches pause with it equally full.
+    // Captures that carry dispatch markers never come through here.
     constexpr int64_t kLaunchGap = 1000;
     int cur = -1; int64_t cur_end = 0, last_begin = 0;
     for (size_t i : order) {
         SqttWave& w = d.waves[i];
-        if (cur < 0 || w.begin > cur_end || w.begin - last_begin > kLaunchGap) {
+        bool boundary = cur < 0 || w.begin > cur_end || w.begin - last_begin > kLaunchGap;
+        if (boundary) {
             SqttEvent e; e.time = w.begin; e.kind = EventKind::Dispatch; e.inferred = true; e.id = 0xffffffffu; e.me = w.me; e.pipe = w.pipe;
             e.first_wave = i; e.last_wave = i + 1;
             cur = (int)d.events.size(); d.events.push_back(e); cur_end = w.end;

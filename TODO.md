@@ -17,13 +17,22 @@ CLI (`openrgp_cli`) and a Qt 6 GUI (`openrgp_gui`). See README.md for usage and 
 - AMD_RDF derived SPM counters; RDNA2/3 utilisation-counter tokens.
 - Tests: `ctest` runs RDNA4 and RDNA2 decodes against checked-in captures (and RDNA3 via OPENRGP_TEST_RDNA3).
 
-## Open
-- RDNA2/3 trace some constant v_mov instructions as IMMED and some as VALU; the walker accepts either (ClsEither).
-  The real rule is unknown. Kernel identification also relies on two RDNA2/3 quirks handled in best_match(): wave64
-  waves trace every vector instruction twice, and a vector-memory instruction can be traced twice.
-- Dispatch inference is heuristic (1000-cycle launch gap) when a trace has no dispatch markers.
-- AMD_RDF: derived SPM counters are decoded (sampling interval = median sample step); the raw SpmCounterData chunks are
-  not, since the derived ones carry the same information. The sample carries no capture date (`info` prints "unknown").
+## Open / known limits
+- Dispatch boundaries without markers are inferred from a 1,000-cycle pause in wave launches. Tried and rejected: using
+  residency (hardware wave limit or observed peak) to ignore pauses while the engine is full. VGPR-limited matmuls
+  pause launches with the engine nearly full inside one dispatch, and back-to-back small dispatches pause equally
+  full, so the signal cannot separate them. Captures with dispatch markers (the 780M ones) are exact.
+- RDNA2/3 VALU instructions issued with an empty exec mask are traced as immediate-class tokens. The kernel matcher
+  models this: after an instruction that narrows exec, every VALU up to the next branch or exec restore may be traced
+  as either (ClsEither). Consistent with every capture here, but not verified against hardware documentation.
+  Two more RDNA2/3 quirks are handled in best_match(): wave64 waves trace each vector instruction twice, and a
+  vector-memory instruction can be traced twice.
+- AMD_RDF: derived SPM counters are decoded (sampling interval = median sample step). The raw SpmCounterData chunks
+  are not: they would need the counter-to-register mapping, and the derived counters carry the same data. The sample
+  carries no capture date or wall-clock time anywhere (checked SystemInfo, TraceConfig, TraceProcessInfo), so `info`
+  prints "unknown".
+- Validation is limited to radv captures, one AMD RDF sample, and RDNA2 graphics on one GPU (4 captures of the same
+  app). The RDNA3 test needs a 44 MB capture and only runs when OPENRGP_TEST_RDNA3 is set.
 - The oracle (tools/rtd) needs AMD's closed decoder library; only used for validation, never by the product.
 
 ## Validation targets

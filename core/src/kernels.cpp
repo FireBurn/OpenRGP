@@ -35,13 +35,6 @@ int classify(const std::string& t, bool pre_gfx12) {
     if (starts("flat_")) return (int)InstCat::Flat;
     if (starts("scratch_")) return (int)(pre_gfx12 ? InstCat::Vmem : InstCat::Flat);
     if (starts("global_") || starts("buffer_") || starts("image_") || starts("tbuffer_")) return (int)InstCat::Vmem;
-    // RDNA2/3 sometimes trace a v_mov from a constant or SGPR as an immediate-class instruction instead of a VALU one.
-    if (starts("v_mov_b32")) {
-        size_t c = t.find(','), e = t.find_first_of(" ,", c == std::string::npos ? t.size() : c + 2);
-        std::string src = c == std::string::npos ? "" : t.substr(c + 1, e == std::string::npos ? std::string::npos : e - c - 1);
-        size_t b = src.find_first_not_of(' ');
-        if (b != std::string::npos && src[b] != 'v') return ClsEither;
-    }
     return (int)InstCat::Valu;
 }
 
@@ -114,6 +107,22 @@ bool disassemble(const uint8_t* elf, size_t size, const std::string& mcpu, CodeO
         if (tx.rfind("ds_", 0) == 0) co.ds++;
         if (tx.find("fma_mix") != std::string::npos || tx.find("dot2") != std::string::npos) co.mixfma++;
         if (tx.find("permlane") != std::string::npos || tx.find("dpp") != std::string::npos || tx.find("swizzle") != std::string::npos) co.permute++;
+    }
+    if (mcpu.rfind("gfx12", 0) != 0) {
+        // RDNA2/3 trace a VALU instruction issued with an empty exec mask as an immediate-class token. Whether the mask is
+        // empty depends on the data, so after an instruction that narrows exec every VALU up to the next branch (or
+        // exec restore) may show up as either.
+        bool narrowed = false;
+        for (auto& in : co.ins) {
+            const std::string& t = in.text;
+            bool writes_exec = t.rfind("s_and_saveexec", 0) == 0 || t.rfind("v_cmpx", 0) == 0 || (t.rfind("s_and", 0) == 0 && t.find(" exec") != std::string::npos) ||
+                               (t.rfind("s_bfe_u64 exec", 0) == 0) || (t.rfind("s_andn2", 0) == 0 && t.find(" exec") != std::string::npos);
+            bool restores = (t.rfind("s_mov_b64 exec", 0) == 0 || t.rfind("s_mov_b32 exec", 0) == 0 || t.rfind("s_or_saveexec", 0) == 0 || t.rfind("s_or_b", 0) == 0 && t.find(" exec") != std::string::npos);
+            if (restores) narrowed = false;
+            else if (in.cls == (int)InstCat::Jump || in.cls == ClsCondBranch || in.cls == ClsEnd) narrowed = false;
+            else if (writes_exec) narrowed = true;
+            else if (narrowed && in.cls == (int)InstCat::Valu) in.cls = ClsEither;
+        }
     }
     for (size_t i = 0; i < co.ins.size(); i++) {
         if (targets[i] != 0xffffffffu) { auto it = idx.find(targets[i]); if (it != idx.end()) co.ins[i].target = it->second; }
