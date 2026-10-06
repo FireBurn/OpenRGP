@@ -32,13 +32,18 @@ if(ZSTD_FOUND)
   target_include_directories(openrgp_core PRIVATE ${ZSTD_INCLUDE_DIRS})
 endif()
 
+include(GNUInstallDirs)
+
 # ---- CLI ----
 add_executable(openrgp_cli cli/src/main.cpp)
 target_link_libraries(openrgp_cli PRIVATE openrgp_core)
 
 # ---- GUI (Qt6) ----
-find_package(Qt6 COMPONENTS Widgets QUIET)
-if(Qt6_FOUND)
+option(OPENRGP_GUI "Build the Qt6 GUI when Qt6 is available" ON)
+if(OPENRGP_GUI)
+  find_package(Qt6 COMPONENTS Widgets QUIET)
+endif()
+if(OPENRGP_GUI AND Qt6_FOUND)
   add_executable(openrgp_gui
     gui/src/main.cpp
     gui/src/MainWindow.cpp
@@ -48,9 +53,12 @@ if(Qt6_FOUND)
   set_target_properties(openrgp_gui PROPERTIES
     AUTOMOC ON AUTORCC ON)
   target_include_directories(openrgp_gui PRIVATE gui)
+  install(PROGRAMS $<TARGET_FILE:openrgp_gui> TYPE BIN RENAME openrgp-gui)
 else()
-  message(WARNING "Qt6 not found - skipping GUI")
+  message(STATUS "GUI not built")
 endif()
+install(PROGRAMS $<TARGET_FILE:openrgp_cli> TYPE BIN RENAME openrgp)
+install(FILES README.md TODO.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
 # ---- tests ----
 enable_testing()
